@@ -66,6 +66,12 @@ app.include_router(files.router)
 app.include_router(requests.router)
 app.include_router(certificates.router)
 
+# Serve static files for local dev mode
+from fastapi.staticfiles import StaticFiles
+import os
+os.makedirs("static/uploads", exist_ok=True)
+app.mount("/static/uploads", StaticFiles(directory="static/uploads"), name="static")
+
 
 # Health check endpoint
 @app.get("/health")

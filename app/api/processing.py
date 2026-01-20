@@ -135,13 +135,29 @@ async def start_processing(
                 )
 
                 # 5. AI Certificate Extraction
-                logger.info(f"Running AI extraction on {file_input.file_name}")
-                extractions = await extraction_service.extract_from_pages(
-                    pages=ocr_pages,
-                    bidder_name=request_data.bidder_name,
-                    certificate_types=request_data.certificate_types,
-                    rfp_number=request_data.rfp_number
-                )
+                # --- 3. Extract Certificate Data (Agentic Workflow) ---
+                try:
+                    from app.agents.extraction_graph import extraction_graph
+                    
+                    # Invoke LangGraph Agent
+                    logger.info(f"Invoking Agentic Extraction for file {file_input.id}")
+                    graph_input = {
+                        "pages": ocr_pages,
+                        "bidder_name": request_data.bidder_name,
+                        "certificate_types": [ct.model_dump() for ct in request_data.certificate_types],
+                        "rfp_number": request_data.rfp_number,
+                        "attempts": 0
+                    }
+                    
+                    agent_output = await extraction_graph.ainvoke(graph_input)
+                    result = agent_output.get("extraction_result", {})
+                    extractions = [result] if result else []
+                    
+                    logger.info(f"Agent finished. Attempt count: {agent_output.get('attempts')}")
+
+                except Exception as e:
+                    logger.error(f"Agent extraction failed: {e}")
+                    raise HTTPException(status_code=500, detail=f"Agent extraction failed: {str(e)}")
 
                 # Attach file_id and request_id to each extraction
                 for extraction in extractions:

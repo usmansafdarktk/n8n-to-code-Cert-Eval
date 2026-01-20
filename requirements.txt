@@ -20,9 +20,11 @@ passlib[bcrypt]==1.7.4
 python-multipart==0.0.6
 
 # Google Cloud
-google-cloud-storage==2.14.0
-google-cloud-aiplatform==1.42.1
-vertexai==1.42.1
+google-cloud-storage==1.71.1
+google-cloud-aiplatform==1.71.1
+langgraph
+langchain-core
+vertexai
 
 # HTTP Client
 httpx==0.26.0

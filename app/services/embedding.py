@@ -28,13 +28,65 @@ class EmbeddingService:
 
     def __init__(self):
         """Initialize the Vertex AI embedding model."""
-        vertexai.init(
-            project=settings.gcp_project_id,
-            location=settings.vertex_ai_location
-        )
-        self.model = TextEmbeddingModel.from_pretrained(
-            settings.vertex_ai_embedding_model
-        )
+        try:
+            vertexai.init(
+                project=settings.gcp_project_id,
+                location=settings.vertex_ai_location
+            )
+            self.model = TextEmbeddingModel.from_pretrained(
+                settings.vertex_ai_embedding_model
+            )
+            self.mock_mode = False
+        except Exception as e:
+            logger.warning(f"Embedding init failed ({e}), enabling MOCK MODE")
+            self.mock_mode = True
+
+    def generate_embedding(self, text: str, task_type: str = "RETRIEVAL_DOCUMENT") -> List[float]:
+        """Generate embedding vector for a single text."""
+        if self.mock_mode:
+            # Return random vector
+            import random
+            return [random.uniform(-0.1, 0.1) for _ in range(self.EMBEDDING_DIMENSION)]
+
+        if not text or not text.strip():
+            logger.warning("Empty text provided for embedding, returning zero vector")
+            return [0.0] * self.EMBEDDING_DIMENSION
+
+        try:
+            # Truncate if text is too long (max ~20K chars for text-embedding-004)
+            max_length = 20000
+            if len(text) > max_length:
+                logger.warning(
+                    f"Text too long ({len(text)} chars), truncating to {max_length}"
+                )
+                text = text[:max_length]
+
+            # Create embedding input
+            embedding_input = TextEmbeddingInput(
+                text=text,
+                task_type=task_type
+            )
+
+            # Generate embedding
+            embeddings = self.model.get_embeddings([embedding_input])
+
+            if not embeddings or len(embeddings) == 0:
+                logger.error("No embeddings returned from API")
+                return [0.0] * self.EMBEDDING_DIMENSION
+
+            # Extract the vector values
+            embedding_vector = embeddings[0].values
+
+            logger.debug(
+                f"Generated embedding with {len(embedding_vector)} dimensions"
+            )
+
+            return embedding_vector
+
+        except Exception as e:
+            logger.error(f"Failed to generate embedding: {e}")
+            # Return zero vector on failure
+            return [0.0] * self.EMBEDDING_DIMENSION
 
     def split_by_pages(self, full_text: str) -> List[str]:
         """Split full document text by page delimiter.

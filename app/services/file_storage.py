@@ -13,11 +13,20 @@ class FileStorageService:
     """Handle file uploads and signed URL generation with Google Cloud Storage."""
 
     def __init__(self) -> None:
-        """Initialize GCS client."""
-        self.client = storage.Client.from_service_account_json(
-            settings.gcp_service_account_key_path
-        )
-        self.bucket = self.client.bucket(settings.gcs_bucket_name)
+        """Initialize GCS client with local fallback."""
+        try:
+            self.client = storage.Client.from_service_account_json(
+                settings.gcp_service_account_key_path
+            )
+            self.bucket = self.client.bucket(settings.gcs_bucket_name)
+            self.is_local = False
+        except Exception as e:
+            logger.warning(f"GCS init failed ({e}), falling back to local storage")
+            self.is_local = True
+            # Create local upload dir
+            import os
+            self.local_dir = "static/uploads"
+            os.makedirs(self.local_dir, exist_ok=True)
 
     def calculate_file_hash(self, file_content: bytes) -> str:
         """
@@ -102,14 +111,23 @@ class FileStorageService:
         # Calculate hash
         file_hash = self.calculate_file_hash(file_content)
 
-        # Upload to GCS
-        blob = self.bucket.blob(storage_path)
-        blob.upload_from_string(file_content, content_type=content_type)
-
-        logger.info(f"Uploaded file to GCS: {storage_path} (hash: {file_hash[:8]}...)")
-
-        # Generate signed URL
-        signed_url = await self.generate_signed_url(storage_path)
+        if self.is_local:
+            # Local Save
+            save_path = f"{self.local_dir}/{clean_filename}"
+            with open(save_path, "wb") as f:
+                f.write(file_content)
+            
+            storage_path = save_path
+            # Local localhost URL
+            signed_url = f"http://localhost:8000/{save_path}"
+            logger.info(f"Saved locally: {storage_path}")
+        else:
+            # GCS Upload
+            blob = self.bucket.blob(storage_path)
+            blob.upload_from_string(file_content, content_type=content_type)
+            logger.info(f"Uploaded to GCS: {storage_path}")
+            # Generate signed URL
+            signed_url = await self.generate_signed_url(storage_path)
 
         return storage_path, signed_url, file_hash
 
@@ -132,6 +150,9 @@ class FileStorageService:
             expiration_days = settings.signed_url_expiration_days
 
         expiration = datetime.utcnow() + timedelta(days=expiration_days)
+
+        if self.is_local:
+            return f"http://localhost:8000/{storage_path}"
 
         blob = self.bucket.blob(storage_path)
 

@@ -1,8 +1,8 @@
-"""Initial schema with all models
+"""initial_schema
 
-Revision ID: ccfd06a73a85
+Revision ID: 43b44d59fe2b
 Revises: 
-Create Date: 2026-01-19 21:10:34.990283
+Create Date: 2026-01-20 21:08:12.766800
 
 """
 from typing import Sequence, Union
@@ -10,10 +10,10 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
-from pgvector.sqlalchemy import Vector
+import pgvector
 
 # revision identifiers, used by Alembic.
-revision: str = 'ccfd06a73a85'
+revision: str = '43b44d59fe2b'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -98,7 +98,7 @@ def upgrade() -> None:
     sa.Column('totalpages', sa.Integer(), nullable=True),
     sa.Column('biddername', sa.String(length=500), nullable=True),
     sa.Column('rfpnumber', sa.String(length=255), nullable=True),
-    sa.Column('embedding', Vector(768), nullable=True),
+    sa.Column('embedding', pgvector.sqlalchemy.Vector(dim=768), nullable=True),
     sa.ForeignKeyConstraint(['request_id'], ['request.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
