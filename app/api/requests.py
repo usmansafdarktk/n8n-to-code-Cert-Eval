@@ -2,9 +2,10 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, BigInteger, case
 from typing import List, Dict, Any
 from uuid import UUID
+import uuid
 
 from app.config.database import get_db
 from app.utils.auth import get_current_user
@@ -70,22 +71,13 @@ async def get_requests_summary(
                 select(
                     func.count().label('total'),
                     func.sum(
-                        func.cast(
-                            Certificate.validation_status == 'PASSED',
-                            db.bind.dialect.type_descriptor(db.bind.dialect.BIGINT)
-                        )
+                        case((Certificate.validation_status == 'PASSED', 1), else_=0)
                     ).label('passed'),
                     func.sum(
-                        func.cast(
-                            Certificate.validation_status == 'FAILED',
-                            db.bind.dialect.type_descriptor(db.bind.dialect.BIGINT)
-                        )
+                        case((Certificate.validation_status == 'FAILED', 1), else_=0)
                     ).label('failed'),
                     func.sum(
-                        func.cast(
-                            Certificate.validation_status == 'WARNING',
-                            db.bind.dialect.type_descriptor(db.bind.dialect.BIGINT)
-                        )
+                        case((Certificate.validation_status == 'WARNING', 1), else_=0)
                     ).label('warnings')
                 ).where(Certificate.request_id == req.id)
             )
@@ -340,6 +332,7 @@ async def add_request_note(
 
         # Create note
         note = RequestNote(
+            id=uuid.uuid4(),
             request_id=request_id,
             note=note_text,
             created_by=current_user

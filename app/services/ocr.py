@@ -78,7 +78,7 @@ class OCRService:
                 )
                 response.raise_for_status()
                 ocr_result = response.json()
-
+                
             except httpx.HTTPError as e:
                 logger.error(f"OCR API request failed: {e}")
                 raise RuntimeError(f"OCR processing failed: {e}")

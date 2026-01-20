@@ -101,16 +101,18 @@ async def start_processing(
                 attachment = Attachment(
                     id=file_input.id,
                     request_id=request_id,
-                    filename=file_input.file_name,
+                    name=file_input.file_name,
                     storage_path=file_input.signed_url,  # Already uploaded
                     file_hash="",  # Will be updated
-                    file_size=len(file_content),
+                    file_size_bytes=len(file_content),
                     signed_url=file_input.signed_url,
-                    document_role=file_input.document_role,
+                    # document_role not in model
                     created_by=current_user,
-                    uploaded_by=current_user
+                    # uploaded_by not in model
+                    file_type="pdf",
+                    content_type="application/pdf"
                 )
-                db.add(attachment)
+                attachment = await db.merge(attachment)
 
                 # 4. OCR processing
                 logger.info(f"Running OCR on {file_input.file_name}")

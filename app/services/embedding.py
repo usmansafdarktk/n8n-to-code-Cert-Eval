@@ -28,26 +28,16 @@ class EmbeddingService:
 
     def __init__(self):
         """Initialize the Vertex AI embedding model."""
-        try:
-            vertexai.init(
-                project=settings.gcp_project_id,
-                location=settings.vertex_ai_location
-            )
-            self.model = TextEmbeddingModel.from_pretrained(
-                settings.vertex_ai_embedding_model
-            )
-            self.mock_mode = False
-        except Exception as e:
-            logger.warning(f"Embedding init failed ({e}), enabling MOCK MODE")
-            self.mock_mode = True
+        vertexai.init(
+            project=settings.gcp_project_id,
+            location=settings.vertex_ai_location
+        )
+        self.model = TextEmbeddingModel.from_pretrained(
+            settings.vertex_ai_embedding_model
+        )
 
     def generate_embedding(self, text: str, task_type: str = "RETRIEVAL_DOCUMENT") -> List[float]:
         """Generate embedding vector for a single text."""
-        if self.mock_mode:
-            # Return random vector
-            import random
-            return [random.uniform(-0.1, 0.1) for _ in range(self.EMBEDDING_DIMENSION)]
-
         if not text or not text.strip():
             logger.warning("Empty text provided for embedding, returning zero vector")
             return [0.0] * self.EMBEDDING_DIMENSION

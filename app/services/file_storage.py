@@ -111,23 +111,22 @@ class FileStorageService:
         # Calculate hash
         file_hash = self.calculate_file_hash(file_content)
 
-        if self.is_local:
-            # Local Save
-            save_path = f"{self.local_dir}/{clean_filename}"
-            with open(save_path, "wb") as f:
-                f.write(file_content)
-            
-            storage_path = save_path
-            # Local localhost URL
-            signed_url = f"http://localhost:8000/{save_path}"
-            logger.info(f"Saved locally: {storage_path}")
-        else:
+        if not self.is_local:
             # GCS Upload
             blob = self.bucket.blob(storage_path)
             blob.upload_from_string(file_content, content_type=content_type)
             logger.info(f"Uploaded to GCS: {storage_path}")
             # Generate signed URL
             signed_url = await self.generate_signed_url(storage_path)
+        else:
+            # Local Save (only if explicitly configured as local in init)
+            save_path = f"{self.local_dir}/{clean_filename}"
+            with open(save_path, "wb") as f:
+                f.write(file_content)
+            
+            storage_path = save_path
+            signed_url = f"http://localhost:8000/{save_path}"
+            logger.info(f"Saved locally: {storage_path}")
 
         return storage_path, signed_url, file_hash
 

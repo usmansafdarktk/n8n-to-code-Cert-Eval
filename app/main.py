@@ -1,4 +1,6 @@
-"""FastAPI application for Certificate Validation Agent."""
+"""FastAPI application for Certificate Validation Agent.
+# Reload triggered for ENV Update (Expiration Days)
+"""
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +13,13 @@ from app.config.settings import settings
 from app.config.database import init_db, close_db
 from app.config.logging import setup_logging
 from app.api import processing, files, requests, certificates
+
+# Set GCP Credentials explicitly for Vertex AI and Storage
+import os
+if settings.gcp_service_account_key_path:
+    key_path = os.path.abspath(settings.gcp_service_account_key_path)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
+    logger.info(f"Set GCP Credentials path: {key_path}")
 
 
 @asynccontextmanager
