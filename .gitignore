@@ -1,0 +1,97 @@
+gcp-key.json
+*.json
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+gcp-key.json
+*service-account*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# Poetry
+poetry.lock
+.poetry/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.claude/
+
+# Logs
+logs/
+*.log
+log/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+database/
+
+# Documentation (excluding from repo)
+FINAL_STATUS.md
+IMPLEMENTATION_GUIDE.md
+IMPLEMENTATION_SUMMARY.md
+PROJECT_STATUS.md
+QUICKSTART.md
+SETUP_GUIDE.md
+VERIFICATION_CHECKLIST.md
+n8n_system_prompt.txt
+n8n_user_prompt.txt
+
+# Test coverage
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+.tmp/
+temp/
+
+# OS files
+Thumbs.db
+.DS_Store

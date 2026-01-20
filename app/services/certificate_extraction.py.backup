@@ -1,0 +1,492 @@
+"""AI-powered certificate extraction service using Google Vertex AI Gemini.
+
+This service uses Google's Gemini 2.0 Flash model to intelligently parse
+bilingual (Arabic/English) certificates and extract structured metadata.
+"""
+
+import json
+from typing import Dict, List, Optional, Any
+from datetime import datetime, timedelta
+import re
+
+from google.cloud import aiplatform
+import vertexai
+from vertexai.generative_models import GenerativeModel, GenerationConfig
+
+from app.config.settings import settings
+from app.utils.text_normalizer import TextNormalizer
+from loguru import logger
+
+
+class CertificateExtractionService:
+    """Service for extracting structured data from certificates using AI."""
+
+    def __init__(self):
+        """Initialize the Vertex AI client."""
+        vertexai.init(
+            project=settings.gcp_project_id,
+            location=settings.vertex_ai_location
+        )
+        self.model = GenerativeModel(settings.vertex_ai_text_model)
+
+    def _build_system_prompt(
+        self,
+        bidder_name: str,
+        certificate_types: List[Dict[str, str]],
+        rfp_number: str
+    ) -> str:
+        """Build the comprehensive system prompt for certificate extraction.
+
+        Args:
+            bidder_name: Official bidder/entity name to match against
+            certificate_types: List of valid certificate types with names
+            rfp_number: RFP/tender number for context
+
+        Returns:
+            Complete system prompt for the AI model
+        """
+        # Format certificate types list
+        cert_types_formatted = "\n".join([
+            f"- {ct.get('name_en', '')} / {ct.get('name_ar', '')}"
+            for ct in certificate_types
+        ])
+
+        system_prompt = f"""You are an advanced Certificate Extraction AI Agent specialized in analyzing bilingual (Arabic and English) certificate documents from scanned PDFs. Your task is to extract structured information from each document with high accuracy.
+
+# CONTEXT
+- **Bidder Name**: {bidder_name}
+- **RFP Number**: {rfp_number}
+- **Valid Certificate Types**:
+{cert_types_formatted}
+
+# YOUR RESPONSIBILITIES
+
+## 1. DOCUMENT CLASSIFICATION
+First, determine if the document is an actual **certificate** or a **non-certificate document**:
+
+### Certificates Include:
+- Registration certificates (سجل تجاري, commercial registration)
+- Tax certificates (شهادة ضريبية, زكاة وضريبة)
+- Professional licenses (رخصة مهنية)
+- Quality certifications (ISO, QHSE)
+- Insurance certificates
+- Membership certificates (chamber of commerce, غرفة تجارية)
+- Compliance certificates
+- Accreditation certificates
+- Safety certificates
+
+### Non-Certificates Include:
+- CVs / Resumes (السيرة الذاتية)
+- Technical proposals (العرض الفني)
+- Financial proposals (العرض المالي)
+- Company profiles
+- Project portfolios
+- Letters of recommendation
+- General correspondence
+- Organizational charts
+- Equipment lists
+- Any other supporting documents
+
+**CRITICAL**: If it's not a certificate, set `is_certificate: false` and `document_type` to the appropriate category (e.g., "CV", "Technical Proposal", "Company Profile", etc.)
+
+## 2. CERTIFICATE METADATA EXTRACTION
+
+For actual certificates, extract the following fields:
+
+### A. Entity Name Matching (CRITICAL)
+- **extracted_bidder_name**: The exact entity/company name as it appears on the certificate
+- **bidder_name_match_confidence**: How well it matches the official bidder name
+  - "EXACT": Perfect match (same spelling, same format)
+  - "HIGH": Minor differences (extra spaces, punctuation, abbreviations like "LLC" vs "ذ.م.م")
+  - "MEDIUM": Noticeable differences but clearly the same entity
+  - "LOW": Significant differences, possibly different entity
+  - "NONE": Completely different entity or no entity name found
+
+**Matching Rules**:
+- Ignore case differences
+- Ignore extra whitespace
+- Treat "LLC", "ذ.م.م", "ش.ذ.م.م", "Co.", "Company", "مؤسسة", "شركة" as equivalent
+- Arabic/English versions of same name are EXACT match
+- Look for the entity name in typical locations: header, "issued to", "holder", "اسم المنشأة", "الجهة"
+
+### B. Certificate Type Matching
+- **certificate_type_name**: The certificate type as written on the document
+- **matched_certificate_type_id**: UUID of the matching certificate type from the provided list
+- **certificate_type_match_confidence**: Confidence in the type match
+  - "EXACT": Direct match with one of the valid types
+  - "HIGH": Very similar to a valid type (e.g., "Tax Certificate" matches "Zakat & Tax Certificate")
+  - "MEDIUM": Partial match or related type
+  - "LOW": Unclear type or weak match
+  - "NONE": No match with valid types
+
+**Matching Logic**:
+- Check both Arabic and English names in the valid types list
+- Consider synonyms (e.g., "سجل تجاري" = "commercial registration" = "CR")
+- ISO certifications should match quality-related types
+- Chamber of Commerce = Membership certificates
+
+### C. Issuing Authority
+- **issuer_name**: The organization that issued the certificate
+  - Examples: "Ministry of Commerce", "ZATCA", "chamber of commerce", "وزارة التجارة", "هيئة الزكاة"
+  - Extract from: letterhead, stamp, signature area, footer
+  - Look for: logos, official names, "issued by", "صادر عن"
+
+### D. Dates (CRITICAL - Handle Multiple Formats)
+
+#### Issue Date
+- **issue_date**: When the certificate was issued (ISO format YYYY-MM-DD)
+- **issue_date_confidence**: Confidence in the extraction
+  - "HIGH": Clear date field labeled "issue date", "تاريخ الإصدار", "date of issue"
+  - "MEDIUM": Date found but label unclear
+  - "LOW": Guessed from context
+
+#### Expiry Date (Complex Logic Required)
+
+**Scenario 1: Explicit Expiry Date**
+- Look for: "expiry date", "valid until", "تاريخ الانتهاء", "صالح حتى"
+- Set `expiry_date` to that date
+- Set `expiry_date_confidence: "HIGH"`
+
+**Scenario 2: Relative Validity Period (CRITICAL)**
+If no explicit expiry date but there's a validity period statement:
+- **Arabic patterns**:
+  - "صالح لمدة سنة واحدة" = valid for 1 year
+  - "صالح لمدة سنتين" = valid for 2 years
+  - "صالح لمدة ثلاث سنوات" = valid for 3 years
+  - "صالح لمدة X شهر" = valid for X months
+  - "صالحة لمدة" + number + "سنة/سنوات/شهر/شهور"
+
+- **English patterns**:
+  - "valid for one year" = 1 year
+  - "valid for 1 year" / "validity: 1 year"
+  - "valid for X months"
+
+**CALCULATION LOGIC**:
+```
+expiry_date = issue_date + validity_period
+```
+
+Examples:
+- Issue: 2024-01-15, "صالح لمدة سنة واحدة" → Expiry: 2025-01-15
+- Issue: 2023-06-01, "valid for 2 years" → Expiry: 2025-06-01
+- Issue: 2024-03-10, "صالح لمدة 6 شهور" → Expiry: 2024-09-10
+
+Set `expiry_date_confidence: "MEDIUM"` when calculated from relative period.
+
+**Scenario 3: No Expiry Information**
+- Some certificates never expire (e.g., commercial registration in some jurisdictions)
+- Set `expiry_date: null`
+- Set `has_expiry: false`
+- Set `expiry_date_confidence: "NONE"`
+
+### E. Additional Metadata
+- **certificate_number**: Registration number, certificate ID, serial number
+  - Look for: "رقم", "number", "no.", "reg. no.", "certificate no."
+- **scope**: For ISO/quality certs, the scope of certification
+- **standard**: For ISO certs (e.g., "ISO 9001:2015")
+
+## 3. LANGUAGE DETECTION
+- **language**: Detected language of the document
+  - "ar": Primarily Arabic
+  - "en": Primarily English
+  - "bilingual": Both Arabic and English
+  - "unknown": Cannot determine
+
+## 4. OUTPUT FORMAT
+
+Return a valid JSON object with this exact structure:
+
+```json
+{{
+  "is_certificate": true,
+  "document_type": "certificate",
+  "extracted_bidder_name": "Company Name LLC",
+  "bidder_name_match_confidence": "HIGH",
+  "certificate_type_name": "Commercial Registration Certificate",
+  "matched_certificate_type_id": "uuid-here-or-null",
+  "certificate_type_match_confidence": "EXACT",
+  "issuer_name": "Ministry of Commerce",
+  "issue_date": "2024-01-15",
+  "issue_date_confidence": "HIGH",
+  "expiry_date": "2025-01-15",
+  "expiry_date_confidence": "MEDIUM",
+  "has_expiry": true,
+  "certificate_number": "1234567890",
+  "language": "bilingual",
+  "scope": null,
+  "standard": null,
+  "extraction_notes": "Calculated expiry from 'صالح لمدة سنة واحدة' clause"
+}}
+```
+
+For non-certificates:
+```json
+{{
+  "is_certificate": false,
+  "document_type": "CV",
+  "extracted_bidder_name": null,
+  "bidder_name_match_confidence": "NONE",
+  "language": "en"
+}}
+```
+
+## 5. SPECIAL INSTRUCTIONS
+
+- **Be conservative**: If unsure, use lower confidence levels
+- **Multiple pages**: If the document has multiple pages, treat them as ONE document
+- **Mixed documents**: If a page has both certificate and non-certificate content, classify based on the primary content
+- **Arabic numbers**: Text has already been normalized (٠-٩ → 0-9), so dates should be in Western format
+- **Incomplete certificates**: If missing critical fields (e.g., no dates), still extract what you can
+- **QR codes/barcodes**: Ignore these, focus on text
+- **Stamps and signatures**: Note them in extraction_notes if they affect confidence
+
+## 6. EDGE CASES
+
+- **Expired certificate renewals**: If you see both old and new dates, use the NEWEST dates
+- **Multiple entities**: If multiple company names appear, match against bidder name or use the "issued to" entity
+- **Ambiguous dates**: If multiple dates with no clear labels, use extraction_notes to explain your choice
+- **Foreign certificates**: Handle English certificates from international bodies (ISO, SGS, etc.)
+
+# REMEMBER
+Your output MUST be valid JSON only. No markdown, no explanations outside the JSON structure. Use the extraction_notes field for any clarifications.
+
+Start your analysis now."""
+
+        return system_prompt
+
+    def _parse_relative_validity(self, text: str, issue_date: Optional[str]) -> Optional[str]:
+        """Parse relative validity periods and calculate expiry date.
+
+        Args:
+            text: Certificate text to search for validity periods
+            issue_date: Issue date in ISO format (YYYY-MM-DD)
+
+        Returns:
+            Calculated expiry date in ISO format, or None if cannot calculate
+        """
+        if not issue_date:
+            return None
+
+        try:
+            issue_dt = datetime.fromisoformat(issue_date)
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid issue date format: {issue_date}")
+            return None
+
+        # Arabic patterns for validity periods
+        arabic_patterns = [
+            (r'صالح(?:ة)?\s+لمدة\s+سنة\s+واحدة', 1, 'years'),
+            (r'صالح(?:ة)?\s+لمدة\s+سنتين', 2, 'years'),
+            (r'صالح(?:ة)?\s+لمدة\s+ثلاث\s+سنوات', 3, 'years'),
+            (r'صالح(?:ة)?\s+لمدة\s+(\d+)\s+سنة', None, 'years'),
+            (r'صالح(?:ة)?\s+لمدة\s+(\d+)\s+سنوات', None, 'years'),
+            (r'صالح(?:ة)?\s+لمدة\s+(\d+)\s+شهر', None, 'months'),
+            (r'صالح(?:ة)?\s+لمدة\s+(\d+)\s+شهور', None, 'months'),
+        ]
+
+        # English patterns
+        english_patterns = [
+            (r'valid\s+for\s+one\s+year', 1, 'years'),
+            (r'valid\s+for\s+(\d+)\s+years?', None, 'years'),
+            (r'valid\s+for\s+(\d+)\s+months?', None, 'months'),
+            (r'validity:?\s+(\d+)\s+years?', None, 'years'),
+            (r'validity:?\s+(\d+)\s+months?', None, 'months'),
+        ]
+
+        all_patterns = arabic_patterns + english_patterns
+
+        for pattern, fixed_value, unit in all_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                if fixed_value is not None:
+                    amount = fixed_value
+                else:
+                    amount = int(match.group(1))
+
+                if unit == 'years':
+                    expiry_dt = issue_dt + timedelta(days=365 * amount)
+                elif unit == 'months':
+                    # Approximate month as 30 days
+                    expiry_dt = issue_dt + timedelta(days=30 * amount)
+                else:
+                    continue
+
+                return expiry_dt.strftime('%Y-%m-%d')
+
+        return None
+
+    async def extract_certificate_data(
+        self,
+        ocr_text: str,
+        bidder_name: str,
+        certificate_types: List[Dict[str, Any]],
+        rfp_number: str,
+        page_number: int = 1
+    ) -> Dict[str, Any]:
+        """Extract structured certificate data from OCR text using AI.
+
+        Args:
+            ocr_text: Normalized OCR text from the certificate
+            bidder_name: Official bidder name to match against
+            certificate_types: List of valid certificate type dictionaries
+            rfp_number: RFP/tender number
+            page_number: Page number being processed
+
+        Returns:
+            Dictionary with extracted certificate data
+        """
+        try:
+            # Build the system prompt
+            system_prompt = self._build_system_prompt(
+                bidder_name=bidder_name,
+                certificate_types=certificate_types,
+                rfp_number=rfp_number
+            )
+
+            # Prepare the user message with the certificate text
+            user_message = f"""Please analyze this certificate text and extract the structured information:
+
+--- CERTIFICATE TEXT START ---
+{ocr_text}
+--- CERTIFICATE TEXT END ---
+
+Page number: {page_number}
+
+Return the extracted data as JSON following the schema provided in the system prompt."""
+
+            # Configure generation parameters
+            generation_config = GenerationConfig(
+                temperature=0.1,  # Low temperature for consistent extraction
+                top_p=0.95,
+                top_k=40,
+                max_output_tokens=2048,
+                response_mime_type="application/json"
+            )
+
+            # Call the AI model
+            logger.info(
+                f"Calling Gemini API for certificate extraction (page {page_number})"
+            )
+
+            response = self.model.generate_content(
+                [system_prompt, user_message],
+                generation_config=generation_config
+            )
+
+            # Parse the JSON response
+            result_text = response.text.strip()
+
+            # Remove markdown code blocks if present
+            if result_text.startswith("```json"):
+                result_text = result_text[7:]
+            if result_text.startswith("```"):
+                result_text = result_text[3:]
+            if result_text.endswith("```"):
+                result_text = result_text[:-3]
+
+            result_text = result_text.strip()
+
+            extraction_result = json.loads(result_text)
+
+            # Post-process: Calculate expiry from relative validity if needed
+            if (extraction_result.get('is_certificate') and
+                not extraction_result.get('expiry_date') and
+                extraction_result.get('issue_date')):
+
+                calculated_expiry = self._parse_relative_validity(
+                    ocr_text,
+                    extraction_result['issue_date']
+                )
+
+                if calculated_expiry:
+                    extraction_result['expiry_date'] = calculated_expiry
+                    extraction_result['expiry_date_confidence'] = 'MEDIUM'
+                    extraction_result['has_expiry'] = True
+
+                    notes = extraction_result.get('extraction_notes', '')
+                    extraction_result['extraction_notes'] = (
+                        f"{notes} | Calculated expiry from relative validity period"
+                        if notes else "Calculated expiry from relative validity period"
+                    )
+
+            logger.info(
+                f"Certificate extraction completed for page {page_number}: "
+                f"is_certificate={extraction_result.get('is_certificate')}"
+            )
+
+            return extraction_result
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse AI response as JSON: {e}")
+            logger.debug(f"Raw response: {result_text}")
+            return {
+                "is_certificate": False,
+                "document_type": "extraction_error",
+                "error": f"JSON parsing error: {str(e)}"
+            }
+
+        except Exception as e:
+            logger.error(f"Certificate extraction failed: {e}")
+            return {
+                "is_certificate": False,
+                "document_type": "extraction_error",
+                "error": str(e)
+            }
+
+    async def extract_from_pages(
+        self,
+        pages: List[Dict[str, Any]],
+        bidder_name: str,
+        certificate_types: List[Dict[str, Any]],
+        rfp_number: str
+    ) -> List[Dict[str, Any]]:
+        """Extract certificate data from multiple pages.
+
+        Args:
+            pages: List of page dictionaries with 'text' field
+            bidder_name: Official bidder name
+            certificate_types: List of valid certificate types
+            rfp_number: RFP number
+
+        Returns:
+            List of extraction results, one per page
+        """
+        results = []
+
+        for page in pages:
+            page_number = page.get('page_number', 1)
+            text = page.get('text', '')
+
+            if not text.strip():
+                logger.warning(f"Page {page_number} has no text, skipping extraction")
+                results.append({
+                    "is_certificate": False,
+                    "document_type": "empty_page",
+                    "page_number": page_number
+                })
+                continue
+
+            # Normalize the text first
+            normalized_text = TextNormalizer.normalize_full_text(text)
+
+            # Extract data
+            extraction = await self.extract_certificate_data(
+                ocr_text=normalized_text,
+                bidder_name=bidder_name,
+                certificate_types=certificate_types,
+                rfp_number=rfp_number,
+                page_number=page_number
+            )
+
+            extraction['page_number'] = page_number
+            extraction['original_text'] = text
+            extraction['normalized_text'] = normalized_text
+
+            results.append(extraction)
+
+        logger.info(
+            f"Completed extraction for {len(results)} pages, "
+            f"{sum(1 for r in results if r.get('is_certificate'))} certificates found"
+        )
+
+        return results

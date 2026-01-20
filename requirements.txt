@@ -1,0 +1,58 @@
+# Core Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# Database
+sqlalchemy==2.0.25
+asyncpg==0.29.0
+pgvector==0.2.4
+alembic==1.13.1
+
+# Pydantic
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# Authentication
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# File Handling
+python-multipart==0.0.6
+
+# Google Cloud
+google-cloud-storage==2.14.0
+google-cloud-aiplatform==1.42.1
+vertexai==1.42.1
+
+# HTTP Client
+httpx==0.26.0
+
+# PDF Processing
+pypdf==4.0.1
+pillow==10.2.0
+
+# Utilities
+python-dateutil==2.8.2
+pytz==2024.1
+
+# Caching & Tasks
+redis==5.0.1
+celery==5.3.6
+
+# Logging
+loguru==0.7.2
+
+# Security
+python-dotenv==1.0.0
+
+# CORS & Middleware
+cors==1.0.1
+
+# Development
+pytest==8.0.0
+pytest-asyncio==0.23.3
+pytest-cov==4.1.0
+black==24.1.1
+ruff==0.1.14
+mypy==1.8.0
+faker==22.6.0

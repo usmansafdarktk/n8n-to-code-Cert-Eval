@@ -1,0 +1,40 @@
+.
+├── app
+│   ├── api
+│   ├── config
+│   │   ├── database.py
+│   │   ├── logging.py
+│   │   └── settings.py
+│   ├── main.py
+│   ├── models
+│   │   ├── attachment_extraction.py
+│   │   ├── attachment.py
+│   │   ├── base.py
+│   │   ├── certificate.py
+│   │   ├── certificate_type.py
+│   │   ├── __init__.py
+│   │   ├── missing_certificate.py
+│   │   ├── other_required_document.py
+│   │   ├── request_note.py
+│   │   └── request.py
+│   ├── schemas
+│   │   ├── certificate.py
+│   │   └── request.py
+│   ├── services
+│   │   ├── file_storage.py
+│   │   └── ocr.py
+│   └── utils
+├── database
+│   ├── migrations
+│   └── seeds
+├── docker-compose.yml
+├── Dockerfile
+├── IMPLEMENTATION_GUIDE.md
+├── PROJECT_STRUCTURE.txt
+├── pyproject.toml
+├── README.md
+├── requirements.txt
+├── tests
+└── workflow.json
+
+12 directories, 26 files
