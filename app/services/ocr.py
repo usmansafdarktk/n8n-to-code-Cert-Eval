@@ -1,7 +1,8 @@
-"""OCR service for extracting text from PDF documents."""
 import base64
 from typing import List, Dict, Any
-import httpx
+import vertexai
+from vertexai.generative_models import GenerativeModel, Part
+from google.oauth2 import service_account
 from loguru import logger
 
 from app.config.settings import settings
@@ -14,6 +15,24 @@ class OCRService:
         """Initialize OCR service."""
         self.api_url = settings.ocr_api_url
         self.timeout = settings.ocr_timeout
+        
+        # Initialize Vertex AI
+        try:
+            # Explicitly load credentials from key file
+            credentials = service_account.Credentials.from_service_account_file(
+                settings.gcp_service_account_key_path
+            )
+            
+            vertexai.init(
+                project=settings.gcp_project_id,
+                location=settings.vertex_ai_location,
+                credentials=credentials
+            )
+            logger.info(f"Initialized Vertex AI with project: {settings.gcp_project_id}")
+            logger.info(f"Authenticated as Service Account: {credentials.service_account_email}")
+        except Exception as e:
+            logger.error(f"Failed to initialize Vertex AI: {e}")
+            raise
 
     def detect_language(self, text: str) -> str:
         """
@@ -45,93 +64,84 @@ class OCRService:
         document_type: str = "certificate"
     ) -> List[Dict[str, Any]]:
         """
-        Process PDF through OCR API and extract text per page.
-
-        Args:
-            pdf_content: PDF file bytes
-            filename: Original filename
-            document_id: Document UUID
-            document_type: Type of document
-
-        Returns:
-            List of page data with text and metadata
+        Process PDF through Gemini Vision and extract text.
+        
+        Note: Replaces deprecated Azure OCR with robust Gemini Multimodal extraction.
         """
-        logger.info(f"Starting OCR for document: {filename} (ID: {document_id})")
+        logger.info(f"Starting Gemini Vision OCR for document: {filename} (ID: {document_id})")
 
-        # Encode PDF to base64
-        pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')
-
-        # Prepare request payload
-        payload = {
-            "Name": filename,
-            "StringBase64Content": pdf_base64,
-            "BinaryContent": None
-        }
-
-        # Call OCR API
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                response = await client.post(
-                    self.api_url,
-                    json=payload,
-                    headers={"Content-Type": "application/json"}
-                )
-                response.raise_for_status()
-                ocr_result = response.json()
+        try:
+            # Create Part from PDF bytes
+            document_part = Part.from_data(pdf_content, mime_type="application/pdf")
+            
+            # Prompt for structured extraction
+            prompt = """
+            You are a high-precision OCR engine. 
+            Extract ALL text from this document exactly as it appears. 
+            Do not summarize.
+            
+            IMPORTANT:
+            If the document has multiple pages, you MUST enable separation by inserting the exact marker "[[[PAGE_BREAK]]]" between the text of each page.
+            Start the output with the text of the first page.
+            """
+            
+            # Generate content
+            # Using the model initialized in __init__ or creating a lightweight one here if preferred
+            # We use the model defined in settings (default gemini-2.0-flash-exp)
+            model = GenerativeModel(settings.vertex_ai_text_model)
+            
+            response = await model.generate_content_async(
+                [document_part, prompt],
+                generation_config={"temperature": 0.0}
+            )
+            
+            full_text = response.text
+            
+            # Split by page marker
+            raw_pages = full_text.split("[[[PAGE_BREAK]]]")
+            cleaned_pages = [p.strip() for p in raw_pages if p.strip()]
+            
+            if not cleaned_pages:
+                # Fallback if model didn't use split keys properly but returned text
+                cleaned_pages = [full_text.strip()]
                 
-            except httpx.HTTPError as e:
-                logger.error(f"OCR API request failed: {e}")
-                raise RuntimeError(f"OCR processing failed: {e}")
+            total_pages = len(cleaned_pages)
+            logger.info(f"Gemini OCR completed: {total_pages} pages extracted")
 
-        # Parse OCR response
-        if isinstance(ocr_result, list):
-            ocr_data = ocr_result[0].get("result", [{}])[0]
-        elif isinstance(ocr_result, dict):
-            result = ocr_result.get("result", [])
-            ocr_data = result[0] if isinstance(result, list) else result
-        else:
-            raise ValueError("Unexpected OCR response format")
-
-        pages = ocr_data.get("pages", [])
-        total_pages = ocr_data.get("totalPages", len(pages))
-
-        logger.info(f"OCR completed: {total_pages} pages extracted from {filename}")
-
-        # Process each page
-        processed_pages = []
-        timestamp = None
-
-        for page_index, page_content in enumerate(pages):
-            # Clean page text
-            page_text = page_content.replace('\r\n', '\n').replace('\n\n\n', '\n\n').strip()
-
-            # Detect language
-            language = self.detect_language(page_text)
-
-            # Word count
-            word_count = len(page_text.split())
-
-            # Add page marker
-            content_with_marker = f"{page_text}\n\n######End_Of_Page######"
-
-            page_data = {
-                "content": content_with_marker,
-                "text": page_text,
-                "metadata": {
-                    "documentId": document_id,
-                    "fileId": document_id,
-                    "fileName": filename,
-                    "documentType": document_type,
-                    "pageNumber": page_index + 1,
-                    "totalPages": total_pages,
-                    "language": language,
-                    "wordCount": word_count,
-                    "timestamp": timestamp,
-                    "isLastPage": (page_index + 1) == total_pages,
-                    "fileType": "pdf"
+            processed_pages = []
+            
+            for i, page_text in enumerate(cleaned_pages):
+                page_num = i + 1
+                
+                # Detect language
+                language = self.detect_language(page_text)
+                word_count = len(page_text.split())
+                
+                # Add existing marker as downstream expects it
+                content_with_marker = f"{page_text}\n\n######End_Of_Page######"
+                
+                page_data = {
+                    "content": content_with_marker,
+                    "text": page_text,
+                    "metadata": {
+                        "documentId": document_id,
+                        "fileId": document_id,
+                        "fileName": filename,
+                        "documentType": document_type,
+                        "pageNumber": page_num,
+                        "totalPages": total_pages,
+                        "language": language,
+                        "wordCount": word_count,
+                        "timestamp": None,
+                        "isLastPage": page_num == total_pages,
+                        "fileType": "pdf"
+                    }
                 }
-            }
+                
+                processed_pages.append(page_data)
+                
+            return processed_pages
 
-            processed_pages.append(page_data)
-
-        return processed_pages
+        except Exception as e:
+            logger.error(f"Gemini OCR failed: {e}")
+            raise RuntimeError(f"OCR processing failed: {e}")

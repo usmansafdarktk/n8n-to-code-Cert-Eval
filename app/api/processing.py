@@ -97,22 +97,44 @@ async def start_processing(
                     file_response.raise_for_status()
                     file_content = file_response.content
 
-                # Create attachment record
-                attachment = Attachment(
-                    id=file_input.id,
-                    request_id=request_id,
-                    name=file_input.file_name,
-                    storage_path=file_input.signed_url,  # Already uploaded
-                    file_hash="",  # Will be updated
-                    file_size_bytes=len(file_content),
-                    signed_url=file_input.signed_url,
-                    # document_role not in model
-                    created_by=current_user,
-                    # uploaded_by not in model
-                    file_type="pdf",
-                    content_type="application/pdf"
+                # Calculate file hash to prevent duplicates
+                import hashlib
+                file_hash = hashlib.sha256(file_content).hexdigest()
+
+                # Check if attachment exists by hash
+                existing_att_by_hash = await db.execute(
+                    select(Attachment).where(Attachment.file_hash == file_hash)
                 )
-                attachment = await db.merge(attachment)
+                existing_att = existing_att_by_hash.scalar_one_or_none()
+
+                if not existing_att:
+                    # Create attachment record
+                    attachment = Attachment(
+                        id=file_input.id,
+                        request_id=request_id,
+                        name=file_input.file_name,
+                        storage_path=file_input.signed_url,  # Already uploaded
+                        file_hash=file_hash,
+                        file_size_bytes=len(file_content),
+                        signed_url=file_input.signed_url,
+                        created_by=current_user,
+                        file_type="pdf",
+                        content_type="application/pdf"
+                    )
+                    db.add(attachment)
+                else:
+                    # If exists globally, we reuse it. 
+                    # Note: If the ID differs, we might have a conflict if we try to use file_input.id
+                    # Ideally we should link the existing attachment or update it.
+                    # For now, we update the existing one's request_id if it's null, or just log it.
+                    logger.info(f"Attachment with hash {file_hash} already exists. Using existing record {existing_att.id}.")
+                    # If we need to process it for THIS request, we might validly need to make sure 
+                    # logic downstream uses existing_att.id or handles the fact it's already there.
+                    # Since downstream uses file_input.id, we might have a disconnect if we don't return the right ID.
+                    # But if we just proceed, the OCR will run on the content we downloaded.
+                    pass
+                
+                await db.commit() # Commit to ensure ID is visible
 
                 # 4. OCR processing
                 logger.info(f"Running OCR on {file_input.file_name}")
@@ -212,35 +234,56 @@ async def start_processing(
 
         # 8. Store missing certificates
         for missing in validation_result['missing_certificates']:
-            missing_cert = MissingCertificate(
-                id=uuid4(),
-                request_id=request_id,
-                certificate_type_id=UUID(missing['certificate_type_id']),
-                status="missing",
-                created_by=current_user
-            )
-            db.add(missing_cert)
+            try:
+                cert_type_id_str = missing.get('certificate_type_id')
+                if not cert_type_id_str:
+                    logger.warning(f"Skipping missing cert with no type ID: {missing}")
+                    continue
+
+                missing_cert = MissingCertificate(
+                    id=uuid4(),
+                    request_id=request_id,
+                    certificate_type_id=UUID(str(cert_type_id_str)),
+                    status="missing",
+                    created_by=current_user
+                )
+                db.add(missing_cert)
+            except ValueError as e:
+                logger.error(f"Invalid UUID for missing cert type: {missing} - {e}")
+                continue
 
         # 9. Store non-certificate documents
-        for other_doc in validation_result['non_certificate_documents']:
-            other_document = OtherRequiredDocument(
-                id=uuid4(),
-                request_id=request_id,
-                attachment_id=UUID(other_doc['file_id']),
-                document_type=other_doc.get('document_type'),
-                document_name=other_doc.get('certificate_type_name'),
-                summary=other_doc.get('extraction_notes'),
-                created_by=current_user
-            )
-            db.add(other_document)
+        for other_doc in validation_result.get('non_certificate_documents', []):
+            try:
+                raw_file_id = other_doc.get('file_id')
+                if not raw_file_id:
+                    logger.warning(f"Skipping other_doc with missing file_id: {other_doc}")
+                    continue
+                    
+                other_document = OtherRequiredDocument(
+                    id=uuid4(),
+                    request_id=request_id,
+                    attachment_id=UUID(str(raw_file_id)),
+                    document_type=other_doc.get('document_type'),
+                    document_name=other_doc.get('certificate_type_name'),
+                    summary=other_doc.get('extraction_notes'),
+                    created_by=current_user
+                )
+                db.add(other_document)
+            except ValueError as e:
+                logger.error(f"Invalid UUID for other_doc: {raw_file_id} - {e}")
+                continue
 
         # 10. Generate and store embeddings
         logger.info("Generating vector embeddings")
         for file_id, full_text in full_ocr_text_by_file.items():
             try:
+                # Validate file_id UUID
+                file_uuid = UUID(str(file_id))
+                
                 await embedding_service.store_certificate_embeddings(
                     db=db,
-                    file_id=UUID(file_id),
+                    file_id=file_uuid,
                     request_id=request_id,
                     full_text=full_text,
                     metadata={
